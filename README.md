@@ -98,3 +98,7 @@ cargo build --release
 
 *   **Q: 头像存在哪？**
     *   A: 头像文件存放在 `data/uploads/avatar/{user_id}/` 下，通过 `/api/v1/avatar/{key}` 短链接对外服务，方便前端缓存和调用。
+
+## License
+
+MIT License © 2026 CloudRaver
