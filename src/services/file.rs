@@ -6,7 +6,7 @@ use crate::db::Database;
 use crate::error::{AppError, Result};
 use crate::models::{
     CreateDirectoryRequest, File, FileBlob, FileListResponse, FileResponse, PathItem,
-    StoragePolicy,
+    StoragePolicy, TrashItem,
 };
 use crate::services::StoragePolicyService;
 use crate::storage::StorageManager;
@@ -16,17 +16,26 @@ pub struct FileService;
 
 impl FileService {
     /// List files in a directory, optionally filtered by storage policy
+    /// Supports both parent_id and path-based queries
     pub async fn list_files(
         db: &Database,
         user_id: &str,
         parent_id: Option<String>,
         policy_id: Option<String>,
+        path: Option<String>,
     ) -> Result<FileListResponse> {
-        let files: Vec<File> = match (&parent_id, &policy_id) {
+        // Resolve path to parent_id if path is provided
+        let resolved_parent_id = if let Some(ref p) = path {
+            Self::resolve_path_to_id(db, user_id, p).await?
+        } else {
+            parent_id
+        };
+
+        let files: Vec<File> = match (&resolved_parent_id, &policy_id) {
             (Some(pid), Some(pol_id)) => {
                 // Filter by parent and policy
                 sqlx::query_as(
-                    "SELECT * FROM files WHERE user_id = ? AND parent_id = ? AND (policy_id = ? OR (is_dir = 1 AND EXISTS (SELECT 1 FROM files AS f WHERE f.parent_id = files.id AND f.policy_id = ?))) ORDER BY is_dir DESC, name ASC",
+                    "SELECT * FROM files WHERE user_id = ? AND parent_id = ? AND deleted_at IS NULL AND (policy_id = ? OR (is_dir = 1 AND EXISTS (SELECT 1 FROM files AS f WHERE f.parent_id = files.id AND f.policy_id = ?))) ORDER BY is_dir DESC, name ASC",
                 )
                 .bind(user_id)
                 .bind(pid)
@@ -38,7 +47,7 @@ impl FileService {
             (Some(pid), None) => {
                 // Filter by parent only
                 sqlx::query_as(
-                    "SELECT * FROM files WHERE user_id = ? AND parent_id = ? ORDER BY is_dir DESC, name ASC",
+                    "SELECT * FROM files WHERE user_id = ? AND parent_id = ? AND deleted_at IS NULL ORDER BY is_dir DESC, name ASC",
                 )
                 .bind(user_id)
                 .bind(pid)
@@ -48,7 +57,7 @@ impl FileService {
             (None, Some(pol_id)) => {
                 // Filter by policy only (root level)
                 sqlx::query_as(
-                    "SELECT * FROM files WHERE user_id = ? AND parent_id IS NULL AND (policy_id = ? OR (is_dir = 1 AND EXISTS (SELECT 1 FROM files AS f WHERE f.parent_id = files.id AND f.policy_id = ?))) ORDER BY is_dir DESC, name ASC",
+                    "SELECT * FROM files WHERE user_id = ? AND parent_id IS NULL AND deleted_at IS NULL AND (policy_id = ? OR (is_dir = 1 AND EXISTS (SELECT 1 FROM files AS f WHERE f.parent_id = files.id AND f.policy_id = ?))) ORDER BY is_dir DESC, name ASC",
                 )
                 .bind(user_id)
                 .bind(pol_id)
@@ -59,7 +68,7 @@ impl FileService {
             (None, None) => {
                 // No filter
                 sqlx::query_as(
-                    "SELECT * FROM files WHERE user_id = ? AND parent_id IS NULL ORDER BY is_dir DESC, name ASC",
+                    "SELECT * FROM files WHERE user_id = ? AND parent_id IS NULL AND deleted_at IS NULL ORDER BY is_dir DESC, name ASC",
                 )
                 .bind(user_id)
                 .fetch_all(db.pool())
@@ -68,12 +77,69 @@ impl FileService {
         };
 
         // Build path (breadcrumb)
-        let path = Self::build_path(db, parent_id.as_deref()).await?;
+        let path = Self::build_path(db, resolved_parent_id.as_deref()).await?;
 
         Ok(FileListResponse {
             files: files.into_iter().map(FileResponse::from).collect(),
             path,
         })
+    }
+
+    /// Resolve a path string to folder ID
+    /// Path format: "/Documents/Projects" or "Documents/Projects"
+    pub async fn resolve_path_to_id(
+        db: &Database,
+        user_id: &str,
+        path: &str,
+    ) -> Result<Option<String>> {
+        // Normalize path: remove leading/trailing slashes, handle empty path
+        let normalized = path.trim_matches('/');
+        if normalized.is_empty() {
+            return Ok(None); // Root directory
+        }
+
+        let parts: Vec<&str> = normalized.split('/').collect();
+        let mut current_parent_id: Option<String> = None;
+
+        for part in parts {
+            if part.is_empty() {
+                continue;
+            }
+
+            // Find folder with this name under current parent
+            let folder: Option<File> = if let Some(ref pid) = current_parent_id {
+                sqlx::query_as(
+                    "SELECT * FROM files WHERE user_id = ? AND parent_id = ? AND name = ? AND is_dir = 1 AND deleted_at IS NULL",
+                )
+                .bind(user_id)
+                .bind(pid)
+                .bind(part)
+                .fetch_optional(db.pool())
+                .await?
+            } else {
+                sqlx::query_as(
+                    "SELECT * FROM files WHERE user_id = ? AND parent_id IS NULL AND name = ? AND is_dir = 1 AND deleted_at IS NULL",
+                )
+                .bind(user_id)
+                .bind(part)
+                .fetch_optional(db.pool())
+                .await?
+            };
+
+            match folder {
+                Some(f) => {
+                    current_parent_id = Some(f.id);
+                }
+                None => {
+                    return Err(AppError::NotFound(format!(
+                        "Folder not found: {}",
+                        part
+                    )));
+                }
+            }
+        }
+
+        Ok(current_parent_id)
     }
 
     /// Build breadcrumb path
@@ -196,10 +262,10 @@ impl FileService {
         // Get storage policy
         let policy = Self::get_user_policy(db, user_id, policy_id).await?;
 
-        // Check if file already exists - if so, update it
+        // Check if file already exists - if so, update it (excluding deleted files)
         let existing_file: Option<File> = if let Some(ref pid) = parent_id {
             sqlx::query_as(
-                "SELECT * FROM files WHERE user_id = ? AND parent_id = ? AND name = ? AND is_dir = 0",
+                "SELECT * FROM files WHERE user_id = ? AND parent_id = ? AND name = ? AND is_dir = 0 AND deleted_at IS NULL",
             )
             .bind(user_id)
             .bind(pid)
@@ -208,7 +274,7 @@ impl FileService {
             .await?
         } else {
             sqlx::query_as(
-                "SELECT * FROM files WHERE user_id = ? AND parent_id IS NULL AND name = ? AND is_dir = 0",
+                "SELECT * FROM files WHERE user_id = ? AND parent_id IS NULL AND name = ? AND is_dir = 0 AND deleted_at IS NULL",
             )
             .bind(user_id)
             .bind(&file_name)
@@ -360,10 +426,10 @@ impl FileService {
         Ok(FileResponse::from(updated))
     }
 
-    /// Delete a file or directory
+    /// Delete a file or directory (soft delete - move to trash)
     pub async fn delete_file(
         db: &Database,
-        storage_manager: &StorageManager,
+        _storage_manager: &StorageManager,
         user_id: &str,
         file_id: &str,
         is_admin: bool,
@@ -375,10 +441,70 @@ impl FileService {
             return Err(AppError::Forbidden("Access denied".to_string()));
         }
 
-        // Delete from storage and database
-        Self::delete_file_recursive(db, storage_manager, &file).await?;
+        // Soft delete - move to trash
+        Self::move_to_trash(db, &file).await?;
 
         Ok(())
+    }
+
+    /// Move a file/directory to trash (soft delete)
+    async fn move_to_trash(db: &Database, file: &File) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+
+        // Store original parent_id and set deleted_at
+        sqlx::query(
+            "UPDATE files SET deleted_at = ?, original_parent_id = parent_id, parent_id = NULL WHERE id = ?",
+        )
+        .bind(&now)
+        .bind(&file.id)
+        .execute(db.pool())
+        .await?;
+
+        // If it's a directory, recursively mark children as deleted
+        if file.is_dir {
+            Self::mark_children_deleted(db, &file.id, &now).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Recursively mark children as deleted
+    fn mark_children_deleted<'a>(
+        db: &'a Database,
+        parent_id: &'a str,
+        deleted_at: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
+        Box::pin(async move {
+            let children: Vec<File> =
+                sqlx::query_as("SELECT * FROM files WHERE parent_id = ? AND deleted_at IS NULL")
+                    .bind(parent_id)
+                    .fetch_all(db.pool())
+                    .await?;
+
+            for child in children {
+                // Mark child as deleted (keep parent_id for structure, don't set original_parent_id for children)
+                sqlx::query("UPDATE files SET deleted_at = ? WHERE id = ?")
+                    .bind(deleted_at)
+                    .bind(&child.id)
+                    .execute(db.pool())
+                    .await?;
+
+                if child.is_dir {
+                    Self::mark_children_deleted(db, &child.id, deleted_at).await?;
+                }
+            }
+
+            Ok(())
+        })
+    }
+
+    /// Permanently delete a file or directory (used by trash operations)
+    pub async fn permanent_delete(
+        db: &Database,
+        storage_manager: &StorageManager,
+        file: &File,
+    ) -> Result<i64> {
+        Self::delete_file_recursive(db, storage_manager, file).await
     }
 
     /// Recursively delete file and its children
@@ -434,7 +560,7 @@ impl FileService {
         })
     }
 
-    /// Check if a name exists in a directory
+    /// Check if a name exists in a directory (excluding deleted files)
     async fn check_name_exists(
         db: &Database,
         user_id: &str,
@@ -443,7 +569,7 @@ impl FileService {
     ) -> Result<bool> {
         let count: (i64,) = if let Some(pid) = parent_id {
             sqlx::query_as(
-                "SELECT COUNT(*) FROM files WHERE user_id = ? AND parent_id = ? AND name = ?",
+                "SELECT COUNT(*) FROM files WHERE user_id = ? AND parent_id = ? AND name = ? AND deleted_at IS NULL",
             )
             .bind(user_id)
             .bind(pid)
@@ -452,7 +578,7 @@ impl FileService {
             .await?
         } else {
             sqlx::query_as(
-                "SELECT COUNT(*) FROM files WHERE user_id = ? AND parent_id IS NULL AND name = ?",
+                "SELECT COUNT(*) FROM files WHERE user_id = ? AND parent_id IS NULL AND name = ? AND deleted_at IS NULL",
             )
             .bind(user_id)
             .bind(name)
@@ -491,5 +617,277 @@ impl FileService {
         })?;
 
         Ok(policy)
+    }
+
+    // ==================== Trash Operations ====================
+
+    /// List items in trash for a user
+    pub async fn list_trash(db: &Database, user_id: &str) -> Result<Vec<TrashItem>> {
+        // Get top-level deleted items (those with original_parent_id set, meaning they were directly deleted)
+        let files: Vec<File> = sqlx::query_as(
+            "SELECT * FROM files WHERE user_id = ? AND deleted_at IS NOT NULL AND original_parent_id IS NOT NULL ORDER BY deleted_at DESC",
+        )
+        .bind(user_id)
+        .fetch_all(db.pool())
+        .await?;
+
+        // Also get items where original_parent_id is explicitly set (root items moved to trash)
+        let root_files: Vec<File> = sqlx::query_as(
+            "SELECT * FROM files WHERE user_id = ? AND deleted_at IS NOT NULL AND parent_id IS NULL ORDER BY deleted_at DESC",
+        )
+        .bind(user_id)
+        .fetch_all(db.pool())
+        .await?;
+
+        // Combine and deduplicate
+        let mut all_files = files;
+        for f in root_files {
+            if !all_files.iter().any(|x| x.id == f.id) {
+                all_files.push(f);
+            }
+        }
+
+        let mut items = Vec::new();
+        for file in all_files {
+            // Build original path
+            let original_path = Self::build_original_path(db, file.original_parent_id.as_deref()).await?;
+
+            items.push(TrashItem {
+                id: file.id,
+                name: file.name,
+                is_dir: file.is_dir,
+                size: file.size,
+                mime_type: file.mime_type,
+                deleted_at: file.deleted_at.unwrap_or_default(),
+                original_parent_id: file.original_parent_id,
+                original_path,
+            });
+        }
+
+        Ok(items)
+    }
+
+    /// Build original path from parent_id
+    async fn build_original_path(db: &Database, parent_id: Option<&str>) -> Result<String> {
+        if parent_id.is_none() {
+            return Ok("/".to_string());
+        }
+
+        let mut path_parts = Vec::new();
+        let mut current_id = parent_id.map(|s| s.to_string());
+
+        while let Some(id) = current_id {
+            let file: Option<File> = sqlx::query_as("SELECT * FROM files WHERE id = ?")
+                .bind(&id)
+                .fetch_optional(db.pool())
+                .await?;
+
+            if let Some(f) = file {
+                path_parts.push(f.name.clone());
+                // Use original_parent_id if available (for deleted items), otherwise parent_id
+                current_id = f.original_parent_id.or(f.parent_id);
+            } else {
+                break;
+            }
+        }
+
+        path_parts.reverse();
+        if path_parts.is_empty() {
+            Ok("/".to_string())
+        } else {
+            Ok(format!("/{}", path_parts.join("/")))
+        }
+    }
+
+    /// Restore items from trash
+    pub async fn restore_from_trash(
+        db: &Database,
+        user_id: &str,
+        file_ids: &[String],
+    ) -> Result<()> {
+        for file_id in file_ids {
+            let file = Self::get_file(db, file_id).await?;
+
+            // Check ownership
+            if file.user_id != user_id {
+                return Err(AppError::Forbidden("Access denied".to_string()));
+            }
+
+            // Check if file is in trash
+            if file.deleted_at.is_none() {
+                return Err(AppError::BadRequest("File is not in trash".to_string()));
+            }
+
+            // Restore the file
+            Self::restore_file(db, &file).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Restore a single file from trash
+    async fn restore_file(db: &Database, file: &File) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+
+        // Check if original parent still exists and is not deleted
+        let can_restore_to_original = if let Some(ref original_parent_id) = file.original_parent_id {
+            let parent: Option<File> = sqlx::query_as(
+                "SELECT * FROM files WHERE id = ? AND deleted_at IS NULL",
+            )
+            .bind(original_parent_id)
+            .fetch_optional(db.pool())
+            .await?;
+            parent.is_some()
+        } else {
+            true // Root level, always can restore
+        };
+
+        let restore_parent_id = if can_restore_to_original {
+            file.original_parent_id.clone()
+        } else {
+            None // Restore to root if original parent is gone
+        };
+
+        // Check for name conflict at restore location
+        let name_exists = Self::check_name_exists(
+            db,
+            &file.user_id,
+            restore_parent_id.as_deref(),
+            &file.name,
+        )
+        .await?;
+
+        let final_name = if name_exists {
+            // Generate unique name
+            Self::generate_unique_name(db, &file.user_id, restore_parent_id.as_deref(), &file.name).await?
+        } else {
+            file.name.clone()
+        };
+
+        // Restore the file
+        sqlx::query(
+            "UPDATE files SET deleted_at = NULL, parent_id = ?, original_parent_id = NULL, name = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(&restore_parent_id)
+        .bind(&final_name)
+        .bind(&now)
+        .bind(&file.id)
+        .execute(db.pool())
+        .await?;
+
+        // If it's a directory, restore children
+        if file.is_dir {
+            Self::restore_children(db, &file.id, &now).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Recursively restore children
+    fn restore_children<'a>(
+        db: &'a Database,
+        parent_id: &'a str,
+        updated_at: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
+        Box::pin(async move {
+            let children: Vec<File> =
+                sqlx::query_as("SELECT * FROM files WHERE parent_id = ? AND deleted_at IS NOT NULL")
+                    .bind(parent_id)
+                    .fetch_all(db.pool())
+                    .await?;
+
+            for child in children {
+                sqlx::query("UPDATE files SET deleted_at = NULL, updated_at = ? WHERE id = ?")
+                    .bind(updated_at)
+                    .bind(&child.id)
+                    .execute(db.pool())
+                    .await?;
+
+                if child.is_dir {
+                    Self::restore_children(db, &child.id, updated_at).await?;
+                }
+            }
+
+            Ok(())
+        })
+    }
+
+    /// Generate a unique name by appending a number
+    async fn generate_unique_name(
+        db: &Database,
+        user_id: &str,
+        parent_id: Option<&str>,
+        original_name: &str,
+    ) -> Result<String> {
+        let mut counter = 1;
+        let (base_name, extension) = if let Some(dot_pos) = original_name.rfind('.') {
+            (&original_name[..dot_pos], Some(&original_name[dot_pos..]))
+        } else {
+            (original_name, None)
+        };
+
+        loop {
+            let new_name = match extension {
+                Some(ext) => format!("{} ({}){}", base_name, counter, ext),
+                None => format!("{} ({})", base_name, counter),
+            };
+
+            if !Self::check_name_exists(db, user_id, parent_id, &new_name).await? {
+                return Ok(new_name);
+            }
+
+            counter += 1;
+            if counter > 100 {
+                return Err(AppError::Internal("Could not generate unique name".to_string()));
+            }
+        }
+    }
+
+    /// Permanently delete items from trash
+    pub async fn delete_from_trash(
+        db: &Database,
+        storage_manager: &StorageManager,
+        user_id: &str,
+        file_ids: &[String],
+    ) -> Result<()> {
+        for file_id in file_ids {
+            let file = Self::get_file(db, file_id).await?;
+
+            // Check ownership
+            if file.user_id != user_id {
+                return Err(AppError::Forbidden("Access denied".to_string()));
+            }
+
+            // Check if file is in trash
+            if file.deleted_at.is_none() {
+                return Err(AppError::BadRequest("File is not in trash".to_string()));
+            }
+
+            // Permanently delete
+            Self::permanent_delete(db, storage_manager, &file).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Empty trash for a user
+    pub async fn empty_trash(
+        db: &Database,
+        storage_manager: &StorageManager,
+        user_id: &str,
+    ) -> Result<()> {
+        // Get all top-level trash items
+        let trash_items: Vec<File> = sqlx::query_as(
+            "SELECT * FROM files WHERE user_id = ? AND deleted_at IS NOT NULL AND parent_id IS NULL",
+        )
+        .bind(user_id)
+        .fetch_all(db.pool())
+        .await?;
+
+        for file in trash_items {
+            Self::permanent_delete(db, storage_manager, &file).await?;
+        }
+
+        Ok(())
     }
 }

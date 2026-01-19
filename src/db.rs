@@ -100,6 +100,8 @@ impl Database {
                 mime_type TEXT,
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                deleted_at TEXT,
+                original_parent_id TEXT,
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
                 FOREIGN KEY (parent_id) REFERENCES files(id) ON DELETE CASCADE,
                 FOREIGN KEY (policy_id) REFERENCES storage_policies(id)
@@ -108,6 +110,14 @@ impl Database {
         )
         .execute(&self.pool)
         .await?;
+
+        // Add trash columns for existing databases
+        let _ = sqlx::query("ALTER TABLE files ADD COLUMN deleted_at TEXT")
+            .execute(&self.pool)
+            .await;
+        let _ = sqlx::query("ALTER TABLE files ADD COLUMN original_parent_id TEXT")
+            .execute(&self.pool)
+            .await;
 
         sqlx::query(
             r#"
@@ -148,6 +158,9 @@ impl Database {
             .execute(&self.pool)
             .await?;
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_files_parent_id ON files(parent_id)")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_files_deleted_at ON files(deleted_at)")
             .execute(&self.pool)
             .await?;
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_storage_policies_user_id ON storage_policies(user_id)")
