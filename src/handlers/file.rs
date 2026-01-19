@@ -15,13 +15,19 @@ use crate::services::{FileService, StoragePolicyService};
 use crate::AppState;
 
 /// List files in a directory
-/// GET /api/v1/files?parent_id=xxx&policy_id=xxx
+/// GET /api/v1/files?parent_id=xxx&policy_id=xxx&path=/Documents/Projects
 pub async fn list_files(
     State(state): State<AppState>,
     Extension(current_user): Extension<CurrentUser>,
     Query(query): Query<FileQuery>,
 ) -> Result<Json<ApiResponse<FileListResponse>>> {
-    let files = FileService::list_files(&state.db, &current_user.id, query.parent_id, query.policy_id).await?;
+    let files = FileService::list_files(
+        &state.db,
+        &current_user.id,
+        query.parent_id,
+        query.policy_id,
+        query.path,
+    ).await?;
     Ok(Json(ApiResponse::success(files)))
 }
 

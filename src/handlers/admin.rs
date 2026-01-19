@@ -65,7 +65,7 @@ pub async fn get_user_files(
 ) -> Result<Json<ApiResponse<FileListResponse>>> {
     require_admin(&current_user)?;
 
-    let files = FileService::list_files(&state.db, &id, None, None).await?;
+    let files = FileService::list_files(&state.db, &id, None, None, None).await?;
     Ok(Json(ApiResponse::success(files)))
 }
 

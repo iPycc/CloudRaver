@@ -2,7 +2,7 @@
 name = "cloudraver"
 version = "0.1.0"
 edition = "2021"
-description = "A self-hosted cloud storage system"
+description = "☁️ CloudRaver: A high-performance, self-hosted cloud storage hub built with Rust. Aggregate your local & COS storage securely. 🚀"
 authors = ["CloudRaver Team"]
 license = "MIT"
 

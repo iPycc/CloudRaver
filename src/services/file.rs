@@ -16,13 +16,22 @@ pub struct FileService;
 
 impl FileService {
     /// List files in a directory, optionally filtered by storage policy
+    /// Supports both parent_id and path-based queries
     pub async fn list_files(
         db: &Database,
         user_id: &str,
         parent_id: Option<String>,
         policy_id: Option<String>,
+        path: Option<String>,
     ) -> Result<FileListResponse> {
-        let files: Vec<File> = match (&parent_id, &policy_id) {
+        // Resolve path to parent_id if path is provided
+        let resolved_parent_id = if let Some(ref p) = path {
+            Self::resolve_path_to_id(db, user_id, p).await?
+        } else {
+            parent_id
+        };
+
+        let files: Vec<File> = match (&resolved_parent_id, &policy_id) {
             (Some(pid), Some(pol_id)) => {
                 // Filter by parent and policy
                 sqlx::query_as(
@@ -68,12 +77,69 @@ impl FileService {
         };
 
         // Build path (breadcrumb)
-        let path = Self::build_path(db, parent_id.as_deref()).await?;
+        let path = Self::build_path(db, resolved_parent_id.as_deref()).await?;
 
         Ok(FileListResponse {
             files: files.into_iter().map(FileResponse::from).collect(),
             path,
         })
+    }
+
+    /// Resolve a path string to folder ID
+    /// Path format: "/Documents/Projects" or "Documents/Projects"
+    pub async fn resolve_path_to_id(
+        db: &Database,
+        user_id: &str,
+        path: &str,
+    ) -> Result<Option<String>> {
+        // Normalize path: remove leading/trailing slashes, handle empty path
+        let normalized = path.trim_matches('/');
+        if normalized.is_empty() {
+            return Ok(None); // Root directory
+        }
+
+        let parts: Vec<&str> = normalized.split('/').collect();
+        let mut current_parent_id: Option<String> = None;
+
+        for part in parts {
+            if part.is_empty() {
+                continue;
+            }
+
+            // Find folder with this name under current parent
+            let folder: Option<File> = if let Some(ref pid) = current_parent_id {
+                sqlx::query_as(
+                    "SELECT * FROM files WHERE user_id = ? AND parent_id = ? AND name = ? AND is_dir = 1",
+                )
+                .bind(user_id)
+                .bind(pid)
+                .bind(part)
+                .fetch_optional(db.pool())
+                .await?
+            } else {
+                sqlx::query_as(
+                    "SELECT * FROM files WHERE user_id = ? AND parent_id IS NULL AND name = ? AND is_dir = 1",
+                )
+                .bind(user_id)
+                .bind(part)
+                .fetch_optional(db.pool())
+                .await?
+            };
+
+            match folder {
+                Some(f) => {
+                    current_parent_id = Some(f.id);
+                }
+                None => {
+                    return Err(AppError::NotFound(format!(
+                        "Folder not found: {}",
+                        part
+                    )));
+                }
+            }
+        }
+
+        Ok(current_parent_id)
     }
 
     /// Build breadcrumb path

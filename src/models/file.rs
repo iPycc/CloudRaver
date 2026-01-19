@@ -81,5 +81,7 @@ pub struct RenameFileRequest {
 pub struct FileQuery {
     pub parent_id: Option<String>,
     pub policy_id: Option<String>,
+    /// Path-based query (e.g., "/Documents/Projects")
+    pub path: Option<String>,
 }
 
