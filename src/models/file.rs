@@ -14,6 +14,10 @@ pub struct File {
     pub mime_type: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// Soft delete timestamp (NULL means not deleted)
+    pub deleted_at: Option<String>,
+    /// Original parent_id before moving to trash (for restore)
+    pub original_parent_id: Option<String>,
 }
 
 /// File response with additional info
@@ -29,6 +33,8 @@ pub struct FileResponse {
     pub mime_type: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    pub deleted_at: Option<String>,
+    pub original_parent_id: Option<String>,
 }
 
 impl From<File> for FileResponse {
@@ -44,6 +50,8 @@ impl From<File> for FileResponse {
             mime_type: file.mime_type,
             created_at: file.created_at,
             updated_at: file.updated_at,
+            deleted_at: file.deleted_at,
+            original_parent_id: file.original_parent_id,
         }
     }
 }
@@ -83,5 +91,24 @@ pub struct FileQuery {
     pub policy_id: Option<String>,
     /// Path-based query (e.g., "/Documents/Projects")
     pub path: Option<String>,
+}
+
+/// Trash item response (for listing trash)
+#[derive(Debug, Clone, Serialize)]
+pub struct TrashItem {
+    pub id: String,
+    pub name: String,
+    pub is_dir: bool,
+    pub size: i64,
+    pub mime_type: Option<String>,
+    pub deleted_at: String,
+    pub original_parent_id: Option<String>,
+    pub original_path: String,
+}
+
+/// Trash action request (restore or permanent delete)
+#[derive(Debug, Deserialize)]
+pub struct TrashActionRequest {
+    pub ids: Vec<String>,
 }
 

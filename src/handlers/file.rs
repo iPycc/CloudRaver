@@ -10,7 +10,7 @@ use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
 use crate::error::{ApiResponse, AppError, Result};
-use crate::models::{CreateDirectoryRequest, CurrentUser, File, FileListResponse, FileQuery, FileResponse, RenameFileRequest};
+use crate::models::{CreateDirectoryRequest, CurrentUser, File, FileListResponse, FileQuery, FileResponse, RenameFileRequest, TrashActionRequest, TrashItem};
 use crate::services::{FileService, StoragePolicyService};
 use crate::AppState;
 
@@ -218,7 +218,7 @@ pub async fn rename_file(
     Ok(Json(ApiResponse::success(file)))
 }
 
-/// Delete a file or directory
+/// Delete a file or directory (moves to trash)
 /// DELETE /api/v1/files/:id
 pub async fn delete_file(
     State(state): State<AppState>,
@@ -233,5 +233,49 @@ pub async fn delete_file(
         current_user.is_admin(),
     )
     .await?;
-    Ok(Json(ApiResponse::<()>::success_message("File deleted")))
+    Ok(Json(ApiResponse::<()>::success_message("File moved to trash")))
+}
+
+// ==================== Trash Handlers ====================
+
+/// List items in trash
+/// GET /api/v1/files/trash
+pub async fn list_trash(
+    State(state): State<AppState>,
+    Extension(current_user): Extension<CurrentUser>,
+) -> Result<Json<ApiResponse<Vec<TrashItem>>>> {
+    let items = FileService::list_trash(&state.db, &current_user.id).await?;
+    Ok(Json(ApiResponse::success(items)))
+}
+
+/// Restore items from trash
+/// POST /api/v1/files/trash/restore
+pub async fn restore_from_trash(
+    State(state): State<AppState>,
+    Extension(current_user): Extension<CurrentUser>,
+    Json(req): Json<TrashActionRequest>,
+) -> Result<impl IntoResponse> {
+    FileService::restore_from_trash(&state.db, &current_user.id, &req.ids).await?;
+    Ok(Json(ApiResponse::<()>::success_message("Files restored")))
+}
+
+/// Permanently delete items from trash
+/// POST /api/v1/files/trash/delete
+pub async fn delete_from_trash(
+    State(state): State<AppState>,
+    Extension(current_user): Extension<CurrentUser>,
+    Json(req): Json<TrashActionRequest>,
+) -> Result<impl IntoResponse> {
+    FileService::delete_from_trash(&state.db, &state.storage, &current_user.id, &req.ids).await?;
+    Ok(Json(ApiResponse::<()>::success_message("Files permanently deleted")))
+}
+
+/// Empty trash
+/// POST /api/v1/files/trash/empty
+pub async fn empty_trash(
+    State(state): State<AppState>,
+    Extension(current_user): Extension<CurrentUser>,
+) -> Result<impl IntoResponse> {
+    FileService::empty_trash(&state.db, &state.storage, &current_user.id).await?;
+    Ok(Json(ApiResponse::<()>::success_message("Trash emptied")))
 }
