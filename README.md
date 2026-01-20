@@ -4,87 +4,58 @@ CloudRaver 是一个**私有云存储中枢**，它不只是一个简单的文�
 
 简单来说，你可以把它理解为**你自己的百度网盘+阿里云盘聚合版**，但是数据完全掌握在你自己手里。
 
-## 更新日志 (Changelog)
+## 更新日志
 
-查看完整的更新日志，请参阅根目录的 [CHANGELOG.md](../CHANGELOG.md)。
+### v1.0.2 Beta
+- 新增前端静态文件嵌入功能，单端口部署
+- 修复iOS Chrome设备识别问题
+- 会话支持即时失效，无需手动刷新
+- 新增IP地址显示和LAN网络检测
 
-### v1.0.2 Beta - 2026-01-21
+### v1.0.1 Beta  
+- 新增回收站功能，支持文件恢复
+- 支持批量操作和永久删除
 
-**🔐 鉴权与会话安全**
-*   **会话即时失效**：Access Token 绑定 Session ID，移除会话后可立即失效，提升“强制下线”一致性。
-*   **刷新风暴修复**：优化刷新逻辑，避免多标签页/并发请求导致的重复刷新与登录态抖动。
-*   **会话信息增强**：增强设备信息识别（支持 iOS Chrome 等 UA 变体），并补全 IP 记录。
-
-**👤 会话管理 API**
-*   `GET /api/v1/user/sessions` - 列出登录会话（含当前会话标识）
-*   `DELETE /api/v1/user/sessions/:id` - 退出指定会话
-*   `DELETE /api/v1/user/sessions/others` - 退出除当前外的所有会话
-
-### v1.0.1 Beta - 2026-01-20
-
-**🗑️ 回收站功能**
-*   **软删除机制**：删除的文件不再直接删除，而是移动到回收站（通过 `deleted_at` 字段标记）。
-*   **恢复功能**：支持从回收站恢复文件到原始位置（通过 `original_parent_id` 字段记录）。
-*   **永久删除**：支持从回收站永久删除文件，真正删除物理存储中的文件。
-*   **清空回收站**：一键清空回收站中的所有文件。
-*   **批量操作**：支持批量恢复和批量删除。
-
-**API 端点**：
-*   `GET /api/v1/files/trash` - 列出回收站中的文件
-*   `POST /api/v1/files/trash/restore` - 从回收站恢复文件
-*   `POST /api/v1/files/trash/delete` - 永久删除文件
-*   `POST /api/v1/files/trash/empty` - 清空回收站
-
-### v1.0.0 Beta - 2026-01-15
-
-**🚀 核心功能发布**
-*   **多端存储聚合**：正式支持**本地存储**与**腾讯云 COS**对象存储的统一管理。
-*   **智能存储策略**：支持自定义文件存储位置（本地/云端）策略。
-*   **高性能上传**：集成 `qcos` SDK，支持大文件分片并发上传、断点续传。
-
-**🔐 安全与鉴权**
-*   **双 Token 机制**：实现 Access Token + Refresh Token (HttpOnly Cookie) 鉴权体系。
-*   **会话安全**：支持多端同步登出、强制下线（基于 Token Versioning）。
-*   **自动密钥管理**：首次启动自动生成高强度 JWT Secret 并持久化，告别默认弱密码。
-
-**👤 用户体系**
-*   **头像管理**：支持自定义头像上传（按用户隔离存储），提供 `/api/v1/avatar/:key` 独立短链服务。
-*   **文件分享**：支持生成私有分享链接。
-
-**🛠️ 系统优化**
-*   **Rust 驱动**：基于 Axum + Tokio 的高并发异步架构。
-*   **端口调整**：默认服务端口调整为 `1309`。
-
----
-
-## 核心特性
-
-*   **统一存储管理**：
-    *   **本地存储**：直接利用服务器硬盘，适合存大文件、电影、备份。
-    *   **腾讯云 COS 集成**：原生支持腾讯云对象存储，支持大文件分片上传、断点续传。你可以像操作本地文件一样操作云端文件。
-    *   **存储策略（Storage Policy）**：你可以定义不同的存储策略，比如“图片存 COS，电影存本地”，或者“公开分享的文件走 COS，私密文档走本地”。
-
-*   **安全与隐私**：
-    *   **强鉴权系统**：基于 JWT + HttpOnly Cookie 的双 token 机制（Access + Refresh），支持多设备登录管理、强制下线。
-    *   **文件分享**：生成带密码和有效期的分享链接，不再依赖第三方网盘。
-    *   **私有部署**：所有元数据存放在本地 SQLite 数据库中，只有你能看到。
-
-*   **高性能后端**：
-    *   基于 **Rust (Axum + Tokio)** 构建，极低的内存占用，极高的并发处理能力。
-    *   利用 `qcos` SDK 实现高效的 COS 操作。
+### v1.0.0 Beta
+- 支持本地存储和腾讯云COS
+- JWT双Token认证系统
+- 文件分享功能
 
 ## 快速开始
 
-### 1. 环境准备
+### 基本运行
+```bash
+cargo build --release
+./target/release/cloudraver
+```
 
-确保你已经安装了：
-*   Rust (Cargo)
-*   SQLite
+### 单端口部署（嵌入前端）
+```bash
+# 先构建前端
+cd ../frontend && npm run build
 
-### 2. 配置
+# 构建带嵌入前端的版本
+cd ../backend
+cargo build --release --features embed-frontend
 
-在 `backend` 目录下创建 `config.toml` 或使用环境变量。
+# 运行
+./target/release/cloudraver
+```
 
+访问 http://localhost:1309
+
+### Windows编译Linux版本
+```bash
+# 安装Linux目标
+rustup target add x86_64-unknown-linux-gnu
+
+# 编译Linux版本
+cargo build --release --target x86_64-unknown-linux-gnu --features embed-frontend
+```
+
+## 配置
+
+创建 `config.toml`：
 ```toml
 [server]
 host = "0.0.0.0"
@@ -94,7 +65,7 @@ port = 1309
 path = "data/cloudraver.db"
 
 [jwt]
-secret = "your-super-secret-key-change-it"
+secret = "your-secret-key"
 access_token_expire_minutes = 60
 refresh_token_expire_days = 7
 
@@ -112,24 +83,6 @@ cargo run
 cargo build --release
 ./target/release/cloudraver
 ```
-
-### 4. 单端口部署（内嵌前端静态资源）
-
-发布版本建议将前端 `dist` 静态文件内嵌进后端二进制，这样只需要一个 `cloudraver` 可执行文件即可在 `1309` 端口同时提供 Web UI 和 API。
-
-```bash
-cd ../frontend
-npm install
-npm run build
-
-cd ../backend
-cargo build --release --features embed-frontend
-./target/release/cloudraver
-```
-
-访问：
-*   Web UI：`http://localhost:1309/`
-*   API：`http://localhost:1309/api/v1`
 
 ## 目录结构
 
