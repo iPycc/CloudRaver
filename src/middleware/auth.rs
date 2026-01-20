@@ -8,6 +8,7 @@ use crate::error::AppError;
 use crate::models::{CurrentUser, UserRole};
 use crate::services::AuthService;
 use crate::AppState;
+use chrono::Utc;
 
 /// Authentication middleware
 /// Extracts and validates JWT from Authorization header
@@ -47,6 +48,24 @@ pub async fn auth_middleware(
 
     if token_version != claims.ver {
         return Err(AppError::Unauthorized("Session expired".to_string()));
+    }
+
+    if let Some(session_id) = &claims.sid {
+        let expires_at: Option<String> = sqlx::query_scalar(
+            "SELECT expires_at FROM refresh_tokens WHERE id = ? AND user_id = ?",
+        )
+        .bind(session_id)
+        .bind(&claims.sub)
+        .fetch_optional(state.db.pool())
+        .await
+        .map_err(|_| AppError::Unauthorized("Invalid token".to_string()))?;
+
+        let expires_at = expires_at.ok_or_else(|| AppError::Unauthorized("Session expired".to_string()))?;
+        let expires_at = chrono::DateTime::parse_from_rfc3339(&expires_at)
+            .map_err(|_| AppError::Unauthorized("Session expired".to_string()))?;
+        if expires_at < Utc::now() {
+            return Err(AppError::Unauthorized("Session expired".to_string()));
+        }
     }
 
     // Create current user

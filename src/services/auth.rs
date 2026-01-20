@@ -129,6 +129,8 @@ impl AuthService {
         db: &Database,
         config: &Config,
         req: LoginRequest,
+        device_info: Option<String>,
+        ip_address: Option<String>,
     ) -> Result<LoginResponse> {
         // Find user
         let user: User = sqlx::query_as("SELECT * FROM users WHERE email = ?")
@@ -148,8 +150,9 @@ impl AuthService {
         }
 
         // Generate tokens
-        let access_token = Self::generate_access_token(&user, config)?;
-        let refresh_token = Self::generate_refresh_token(db, &user.id, config).await?;
+        let (refresh_token, session_id) =
+            Self::generate_refresh_token(db, &user.id, config, device_info, ip_address).await?;
+        let access_token = Self::generate_access_token(&user, config, Some(&session_id))?;
 
         Ok(LoginResponse {
             access_token,
@@ -165,6 +168,8 @@ impl AuthService {
         db: &Database,
         config: &Config,
         refresh_token: &str,
+        device_info: Option<String>,
+        ip_address: Option<String>,
     ) -> Result<LoginResponse> {
         let mut tx = db.pool().begin().await?;
 
@@ -203,19 +208,40 @@ impl AuthService {
         }
 
         // Generate new access token
-        let access_token = Self::generate_access_token(&user, config)?;
-        let new_refresh_token = Self::generate_refresh_token_tx(tx.as_mut(), &user.id, config).await?;
-
-        sqlx::query("DELETE FROM refresh_tokens WHERE id = ?")
-            .bind(&stored_token.id)
-            .execute(tx.as_mut())
-            .await?;
+        let access_token = Self::generate_access_token(&user, config, Some(&stored_token.id))?;
+        let new_expires_at =
+            (Utc::now() + Duration::days(config.jwt.refresh_token_expire_days as i64)).to_rfc3339();
+        sqlx::query(
+            r#"
+            UPDATE refresh_tokens
+            SET expires_at = ?,
+                device_info = CASE
+                    WHEN ? IS NOT NULL AND ? != '' THEN ?
+                    ELSE device_info
+                END,
+                ip_address = CASE
+                    WHEN ? IS NOT NULL AND ? != '' THEN ?
+                    ELSE ip_address
+                END
+            WHERE id = ?
+            "#,
+        )
+        .bind(&new_expires_at)
+        .bind(&device_info)
+        .bind(&device_info)
+        .bind(&device_info)
+        .bind(&ip_address)
+        .bind(&ip_address)
+        .bind(&ip_address)
+        .bind(&stored_token.id)
+        .execute(tx.as_mut())
+        .await?;
 
         tx.commit().await?;
 
         Ok(LoginResponse {
             access_token,
-            refresh_token: Some(new_refresh_token),
+            refresh_token: None,
             token_type: "Bearer".to_string(),
             expires_in: config.jwt.access_token_expire_minutes * 60,
             user: UserResponse::from(user),
@@ -238,7 +264,7 @@ impl AuthService {
     }
 
     /// Generate access token (JWT)
-    fn generate_access_token(user: &User, config: &Config) -> Result<String> {
+    fn generate_access_token(user: &User, config: &Config, session_id: Option<&str>) -> Result<String> {
         let now = Utc::now();
         let exp = now + Duration::minutes(config.jwt.access_token_expire_minutes as i64);
 
@@ -247,6 +273,7 @@ impl AuthService {
             email: user.email.clone(),
             role: user.role.clone(),
             ver: user.token_version,
+            sid: session_id.map(|s| s.to_string()),
             jti: Uuid::new_v4().to_string(),
             exp: exp.timestamp() as usize,
             iat: now.timestamp() as usize,
@@ -266,9 +293,13 @@ impl AuthService {
         db: &Database,
         user_id: &str,
         config: &Config,
-    ) -> Result<String> {
+        device_info: Option<String>,
+        ip_address: Option<String>,
+    ) -> Result<(String, String)> {
         let mut tx = db.pool().begin().await?;
-        let token = Self::generate_refresh_token_tx(tx.as_mut(), user_id, config).await?;
+        let token =
+            Self::generate_refresh_token_tx(tx.as_mut(), user_id, config, device_info, ip_address)
+                .await?;
         tx.commit().await?;
         Ok(token)
     }
@@ -277,7 +308,9 @@ impl AuthService {
         conn: &mut sqlx::SqliteConnection,
         user_id: &str,
         config: &Config,
-    ) -> Result<String> {
+        device_info: Option<String>,
+        ip_address: Option<String>,
+    ) -> Result<(String, String)> {
         // Generate random token
         let token = Uuid::new_v4().to_string();
         let token_hash = Self::hash_token(&token);
@@ -289,19 +322,21 @@ impl AuthService {
 
         sqlx::query(
             r#"
-            INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at, created_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO refresh_tokens (id, user_id, token_hash, device_info, ip_address, expires_at, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(&id)
         .bind(user_id)
         .bind(&token_hash)
+        .bind(&device_info)
+        .bind(&ip_address)
         .bind(&expires_at)
         .bind(&now)
         .execute(conn)
         .await?;
 
-        Ok(token)
+        Ok((token, id))
     }
 
     /// Validate access token and extract claims
@@ -349,7 +384,7 @@ impl AuthService {
     }
 
     /// Hash token for storage
-    fn hash_token(token: &str) -> String {
+    pub fn hash_token(token: &str) -> String {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         hasher.update(token.as_bytes());
@@ -400,5 +435,120 @@ impl AuthService {
             .await?;
 
         Ok(())
+    }
+
+    /// List user sessions
+    pub async fn list_sessions(
+        db: &Database,
+        user_id: &str,
+        current_token_hash: Option<String>,
+    ) -> Result<Vec<crate::models::SessionInfo>> {
+        let tokens: Vec<RefreshToken> = sqlx::query_as(
+            "SELECT * FROM refresh_tokens WHERE user_id = ? ORDER BY created_at DESC"
+        )
+        .bind(user_id)
+        .fetch_all(db.pool())
+        .await?;
+
+        let sessions = tokens
+            .into_iter()
+            .map(|token| {
+                let is_current = current_token_hash
+                    .as_ref()
+                    .map(|hash| hash == &token.token_hash)
+                    .unwrap_or(false);
+
+                crate::models::SessionInfo {
+                    id: token.id,
+                    device_info: token.device_info.unwrap_or_else(|| "Unknown Device".to_string()),
+                    ip_address: token.ip_address.unwrap_or_else(|| "Unknown".to_string()),
+                    location: None, // TODO: Implement IP geolocation
+                    created_at: token.created_at,
+                    is_current,
+                }
+            })
+            .collect();
+
+        Ok(sessions)
+    }
+
+    /// Delete a specific session
+    pub async fn delete_session(
+        db: &Database,
+        user_id: &str,
+        session_id: &str,
+    ) -> Result<()> {
+        sqlx::query("DELETE FROM refresh_tokens WHERE id = ? AND user_id = ?")
+            .bind(session_id)
+            .bind(user_id)
+            .execute(db.pool())
+            .await?;
+        Ok(())
+    }
+
+    /// Delete all sessions except the current one
+    pub async fn delete_other_sessions(
+        db: &Database,
+        user_id: &str,
+        current_token_hash: &str,
+    ) -> Result<()> {
+        sqlx::query("DELETE FROM refresh_tokens WHERE user_id = ? AND token_hash != ?")
+            .bind(user_id)
+            .bind(current_token_hash)
+            .execute(db.pool())
+            .await?;
+        Ok(())
+    }
+
+    /// Parse User-Agent string to extract device info
+    pub fn parse_user_agent(user_agent: &str) -> String {
+        // Simple parsing - in production, use a proper UA parser library
+        let ua = user_agent.to_lowercase();
+
+        let is_iphone = ua.contains("iphone") || ua.contains("ipod");
+        let is_ipad = ua.contains("ipad");
+
+        let browser = if ua.contains("crios/") || ua.contains("crios ") || ua.contains("crios") {
+            "Chrome"
+        } else if ua.contains("fxios/") || ua.contains("fxios") {
+            "Firefox"
+        } else if ua.contains("edgios/") || ua.contains("edgios") {
+            "Edge"
+        } else if ua.contains("edg/") {
+            "Edge"
+        } else if ua.contains("opr/") || ua.contains("opera") {
+            "Opera"
+        } else if ua.contains("chrome/") {
+            "Chrome"
+        } else if ua.contains("firefox/") {
+            "Firefox"
+        } else if ua.contains("safari/")
+            && !ua.contains("chrome")
+            && !ua.contains("crios")
+            && !ua.contains("fxios")
+            && !ua.contains("edg")
+        {
+            "Safari"
+        } else {
+            "Unknown Browser"
+        };
+
+        let os = if is_iphone {
+            "iOS (iPhone)"
+        } else if is_ipad {
+            "iPadOS"
+        } else if ua.contains("android") {
+            "Android"
+        } else if ua.contains("windows nt") || ua.contains("windows") {
+            "Windows"
+        } else if ua.contains("mac os x") || ua.contains("macintosh") || ua.contains("macos") {
+            "macOS"
+        } else if ua.contains("linux") {
+            "Linux"
+        } else {
+            "Unknown OS"
+        };
+
+        format!("{} / {}", browser, os)
     }
 }

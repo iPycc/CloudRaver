@@ -14,12 +14,17 @@ use handlers::{
 // use middleware::auth::auth_middleware;
 
 use axum::{
+    extract::ConnectInfo,
+    http::{Request, StatusCode},
+    middleware::{self as axum_middleware, Next},
+    response::Response,
     routing::{delete, get, post, put},
     Router,
 };
+use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Instant;
 use tower_http::cors::{Any, CorsLayer};
-use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::config::Config;
@@ -40,9 +45,9 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "cloudraver=debug,tower_http=debug".into()),
+                .unwrap_or_else(|_| "cloudraver=info".into()),
         )
-        .with(tracing_subscriber::fmt::layer())
+        .with(tracing_subscriber::fmt::layer().compact())
         .init();
 
     tracing::info!("Starting CloudRaver...");
@@ -70,14 +75,46 @@ async fn main() -> anyhow::Result<()> {
     // Build router
     let app = create_router(state);
 
-    // Start server
+    // Start server with ConnectInfo for IP tracking
     let addr = format!("{}:{}", config.server.host, config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("Server listening on {}", addr);
 
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
 
     Ok(())
+}
+
+/// Simple logging middleware with IP address
+async fn logging_middleware(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    req: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    let method = req.method().clone();
+    let uri = req.uri().clone();
+    let start = Instant::now();
+
+    let response = next.run(req).await;
+
+    let duration = start.elapsed();
+    let status = response.status();
+
+    // Simple log format: IP METHOD PATH STATUS DURATION
+    tracing::info!(
+        "{} {} {} {} {:?}",
+        addr.ip(),
+        method,
+        uri.path(),
+        status.as_u16(),
+        duration
+    );
+
+    response
 }
 
 fn create_router(state: AppState) -> Router {
@@ -103,10 +140,14 @@ fn create_router(state: AppState) -> Router {
         // Auth
         .route("/auth/logout", post(handlers::auth::logout))
         // User profile
-        .route("/user/profile", get(handlers::user::get_profile))
+        .route("/user/profile", get(handlers::user::get_profile).put(handlers::user::update_profile))
         .route("/user/password", put(handlers::user::change_password))
         .route("/user/storage", get(handlers::user::get_storage_usage))
         .route("/user/avatar", post(handlers::user::upload_avatar))
+        // User sessions
+        .route("/user/sessions", get(handlers::auth::list_sessions))
+        .route("/user/sessions/:id", delete(handlers::auth::delete_session))
+        .route("/user/sessions/others", delete(handlers::auth::delete_other_sessions))
         // Storage policies
         .route(
             "/storage/policies",
@@ -147,6 +188,11 @@ fn create_router(state: AppState) -> Router {
                 .delete(handlers::file::delete_file),
         )
         .route("/files/:id/download", get(handlers::file::download_file))
+        // Trash routes
+        .route("/files/trash", get(handlers::file::list_trash))
+        .route("/files/trash/restore", post(handlers::file::restore_from_trash))
+        .route("/files/trash/delete", post(handlers::file::delete_from_trash))
+        .route("/files/trash/empty", post(handlers::file::empty_trash))
         // Admin routes
         .route("/admin/users", get(handlers::admin::list_users))
         .route(
@@ -170,7 +216,7 @@ fn create_router(state: AppState) -> Router {
     // Combine all routes under /api/v1
     Router::new()
         .nest("/api/v1", public_routes.merge(protected_routes))
-        .layer(TraceLayer::new_for_http())
+        .layer(axum_middleware::from_fn(logging_middleware))
         .layer(cors)
         .with_state(state)
 }

@@ -7,7 +7,7 @@ use axum::{
 };
 
 use crate::error::{ApiResponse, Result};
-use crate::models::{ChangePasswordRequest, CurrentUser, UserResponse};
+use crate::models::{ChangePasswordRequest, CurrentUser, UpdateProfileRequest, UserResponse};
 use crate::services::{AuthService, UserService};
 use crate::services::user::StorageUsageResponse;
 use crate::AppState;
@@ -24,6 +24,17 @@ pub async fn get_profile(
     Extension(current_user): Extension<CurrentUser>,
 ) -> Result<Json<ApiResponse<UserResponse>>> {
     let profile = UserService::get_profile(&state.db, &current_user.id).await?;
+    Ok(Json(ApiResponse::success(profile)))
+}
+
+/// Update current user profile
+/// PUT /api/v1/user/profile
+pub async fn update_profile(
+    State(state): State<AppState>,
+    Extension(current_user): Extension<CurrentUser>,
+    Json(req): Json<UpdateProfileRequest>,
+) -> Result<Json<ApiResponse<UserResponse>>> {
+    let profile = UserService::update_profile(&state.db, &current_user.id, req.name).await?;
     Ok(Json(ApiResponse::success(profile)))
 }
 

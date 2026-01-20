@@ -14,9 +14,26 @@ impl Database {
         // Create database URL
         let url = format!("sqlite:{}?mode=rwc", path);
 
-        // Create connection pool
+        // Use only 1 connection to avoid SQLite locking issues
+        // SQLite works best with a single writer
         let pool = SqlitePoolOptions::new()
-            .max_connections(5)
+            .max_connections(1)
+            .after_connect(|conn, _meta| {
+                Box::pin(async move {
+                    use sqlx::Executor;
+                    // WAL mode for better concurrency
+                    conn.execute("PRAGMA journal_mode=WAL;").await?;
+                    // Wait up to 30 seconds when database is locked
+                    conn.execute("PRAGMA busy_timeout=30000;").await?;
+                    // Faster writes with acceptable safety
+                    conn.execute("PRAGMA synchronous=NORMAL;").await?;
+                    // Store temp tables in memory
+                    conn.execute("PRAGMA temp_store=MEMORY;").await?;
+                    // Larger cache for better performance
+                    conn.execute("PRAGMA cache_size=-64000;").await?;
+                    Ok(())
+                })
+            })
             .connect(&url)
             .await?;
 
@@ -144,6 +161,7 @@ impl Database {
                 user_id TEXT NOT NULL,
                 token_hash TEXT NOT NULL,
                 device_info TEXT,
+                ip_address TEXT,
                 expires_at TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
@@ -152,6 +170,11 @@ impl Database {
         )
         .execute(&self.pool)
         .await?;
+
+        // Add ip_address column for existing databases
+        let _ = sqlx::query("ALTER TABLE refresh_tokens ADD COLUMN ip_address TEXT")
+            .execute(&self.pool)
+            .await;
 
         // Create indexes
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_files_user_id ON files(user_id)")
@@ -170,6 +193,9 @@ impl Database {
             .execute(&self.pool)
             .await?;
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user_id ON refresh_tokens(user_id)")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_refresh_tokens_hash ON refresh_tokens(token_hash)")
             .execute(&self.pool)
             .await?;
         sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_avatar_key ON users(avatar_key)")

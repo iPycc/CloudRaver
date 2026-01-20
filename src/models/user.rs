@@ -127,6 +127,12 @@ pub struct ChangePasswordRequest {
     pub new_password: String,
 }
 
+/// Update profile request
+#[derive(Debug, Deserialize)]
+pub struct UpdateProfileRequest {
+    pub name: Option<String>,
+}
+
 /// Current authenticated user (extracted from JWT)
 #[derive(Debug, Clone)]
 pub struct CurrentUser {
@@ -148,6 +154,8 @@ pub struct Claims {
     pub email: String,
     pub role: String,
     pub ver: i64,
+    #[serde(default)]
+    pub sid: Option<String>,
     pub jti: String,
     pub exp: usize,        // expiration time
     pub iat: usize,        // issued at
@@ -160,6 +168,18 @@ pub struct RefreshToken {
     pub user_id: String,
     pub token_hash: String,
     pub device_info: Option<String>,
+    pub ip_address: Option<String>,
     pub expires_at: String,
     pub created_at: String,
+}
+
+/// Session info response
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionInfo {
+    pub id: String,
+    pub device_info: String,
+    pub ip_address: String,
+    pub location: Option<String>,
+    pub created_at: String,
+    pub is_current: bool,
 }
