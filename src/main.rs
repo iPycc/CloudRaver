@@ -6,6 +6,7 @@ mod middleware;
 mod models;
 mod services;
 mod storage;
+mod static_files;
 
 use handlers::{
     // admin, 
@@ -214,8 +215,17 @@ fn create_router(state: AppState) -> Router {
         ));
 
     // Combine all routes under /api/v1
-    Router::new()
-        .nest("/api/v1", public_routes.merge(protected_routes))
+    let app = Router::new().nest("/api/v1", public_routes.merge(protected_routes));
+
+    #[cfg(feature = "embed-frontend")]
+    let app = app
+        .route("/", get(static_files::spa_root_handler))
+        .route("/*path", get(static_files::spa_handler));
+
+    #[cfg(not(feature = "embed-frontend"))]
+    let app = app.fallback_service(static_files::spa_service());
+
+    app
         .layer(axum_middleware::from_fn(logging_middleware))
         .layer(cors)
         .with_state(state)

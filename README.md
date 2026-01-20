@@ -113,6 +113,24 @@ cargo build --release
 ./target/release/cloudraver
 ```
 
+### 4. 单端口部署（内嵌前端静态资源）
+
+发布版本建议将前端 `dist` 静态文件内嵌进后端二进制，这样只需要一个 `cloudraver` 可执行文件即可在 `1309` 端口同时提供 Web UI 和 API。
+
+```bash
+cd ../frontend
+npm install
+npm run build
+
+cd ../backend
+cargo build --release --features embed-frontend
+./target/release/cloudraver
+```
+
+访问：
+*   Web UI：`http://localhost:1309/`
+*   API：`http://localhost:1309/api/v1`
+
 ## 目录结构
 
 *   `src/handlers`: 处理 HTTP 请求的接口逻辑（路由对应的 controller）。
