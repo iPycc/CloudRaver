@@ -123,6 +123,7 @@ fn create_router(state: AppState) -> Router {
     let public_routes = Router::new()
         .route("/auth/register", post(handlers::auth::register))
         .route("/auth/login", post(handlers::auth::login))
+        .route("/auth/login/2fa", post(handlers::auth::login_2fa))
         .route("/auth/refresh", post(handlers::auth::refresh_token))
         .route(
             "/auth/webauthn/authenticate/begin",
@@ -147,8 +148,14 @@ fn create_router(state: AppState) -> Router {
         // User profile
         .route("/user/profile", get(handlers::user::get_profile).put(handlers::user::update_profile))
         .route("/user/password", put(handlers::user::change_password))
+        .route("/user/reauth/password", post(handlers::reauth::reauth_password))
+        .route("/user/reauth/passkey/begin", post(handlers::reauth::begin_passkey_reauth))
+        .route("/user/reauth/passkey/finish", post(handlers::reauth::finish_passkey_reauth))
         .route("/user/storage", get(handlers::user::get_storage_usage))
         .route("/user/avatar", post(handlers::user::upload_avatar))
+        .route("/user/2fa/totp/begin", post(handlers::two_factor::begin_totp))
+        .route("/user/2fa/totp/enable", post(handlers::two_factor::enable_totp))
+        .route("/user/2fa/totp/disable", post(handlers::two_factor::disable_totp))
         .route("/user/passkeys", get(handlers::passkey::list_passkeys))
         .route("/user/passkeys/:id", delete(handlers::passkey::delete_passkey))
         // User sessions

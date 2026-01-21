@@ -6,3 +6,5 @@ pub mod storage;
 pub mod user;
 pub mod multipart;
 pub mod passkey;
+pub mod two_factor;
+pub mod reauth;

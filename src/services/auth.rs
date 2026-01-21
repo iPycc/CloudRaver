@@ -14,6 +14,7 @@ use crate::models::{
     Claims, CreateUserRequest, LoginRequest, LoginResponse, RefreshToken, User, UserResponse,
     UserRole,
 };
+use crate::services::TwoFactorService;
 
 /// Authentication service
 pub struct AuthService;
@@ -149,7 +150,60 @@ impl AuthService {
             return Err(AppError::Unauthorized("Invalid email or password".to_string()));
         }
 
+        if user.totp_enabled != 0 {
+            let mfa_token = Self::create_mfa_login(db, &user.id).await?;
+            return Ok(LoginResponse {
+                mfa_required: true,
+                mfa_token: Some(mfa_token),
+                access_token: None,
+                refresh_token: None,
+                token_type: "Bearer".to_string(),
+                expires_in: 300,
+                user: Some(UserResponse::from(user)),
+            });
+        }
+
         Self::issue_login_response(db, config, user, device_info, ip_address).await
+    }
+
+    pub async fn login_2fa(
+        db: &Database,
+        config: &Config,
+        mfa_token: &str,
+        code: &str,
+        device_info: Option<String>,
+        ip_address: Option<String>,
+    ) -> Result<LoginResponse> {
+        let token_hash = Self::hash_token(mfa_token);
+        let row: Option<(String, String, Option<String>)> = sqlx::query_as(
+            "SELECT user_id, expires_at, used_at FROM mfa_logins WHERE token_hash = ?",
+        )
+        .bind(&token_hash)
+        .fetch_optional(db.pool())
+        .await?;
+
+        let (user_id, expires_at, used_at) =
+            row.ok_or_else(|| AppError::Unauthorized("Invalid verification session".to_string()))?;
+        if used_at.is_some() {
+            return Err(AppError::Unauthorized("Invalid verification session".to_string()));
+        }
+
+        let exp = chrono::DateTime::parse_from_rfc3339(&expires_at)
+            .map_err(|_| AppError::Internal("Invalid token expiry format".to_string()))?;
+        if exp < Utc::now() {
+            return Err(AppError::Unauthorized("Verification session expired".to_string()));
+        }
+
+        TwoFactorService::verify_totp_for_user(db, config, &user_id, code).await?;
+
+        let now = Utc::now().to_rfc3339();
+        sqlx::query("UPDATE mfa_logins SET used_at = ? WHERE token_hash = ?")
+            .bind(&now)
+            .bind(&token_hash)
+            .execute(db.pool())
+            .await?;
+
+        Self::login_user(db, config, &user_id, device_info, ip_address).await
     }
 
     pub async fn login_user(
@@ -181,11 +235,13 @@ impl AuthService {
         let access_token = Self::generate_access_token(&user, config, Some(&session_id))?;
 
         Ok(LoginResponse {
-            access_token,
+            mfa_required: false,
+            mfa_token: None,
+            access_token: Some(access_token),
             refresh_token: Some(refresh_token),
             token_type: "Bearer".to_string(),
             expires_in: config.jwt.access_token_expire_minutes * 60,
-            user: UserResponse::from(user),
+            user: Some(UserResponse::from(user)),
         })
     }
 
@@ -266,12 +322,36 @@ impl AuthService {
         tx.commit().await?;
 
         Ok(LoginResponse {
-            access_token,
+            mfa_required: false,
+            mfa_token: None,
+            access_token: Some(access_token),
             refresh_token: None,
             token_type: "Bearer".to_string(),
             expires_in: config.jwt.access_token_expire_minutes * 60,
-            user: UserResponse::from(user),
+            user: Some(UserResponse::from(user)),
         })
+    }
+
+    async fn create_mfa_login(db: &Database, user_id: &str) -> Result<String> {
+        let token = Uuid::new_v4().to_string();
+        let token_hash = Self::hash_token(&token);
+        let expires_at = (Utc::now() + Duration::minutes(5)).to_rfc3339();
+        let id = Uuid::new_v4().to_string();
+
+        sqlx::query(
+            r#"
+            INSERT INTO mfa_logins (id, user_id, token_hash, expires_at, used_at, created_at)
+            VALUES (?, ?, ?, ?, NULL, datetime('now'))
+            "#,
+        )
+        .bind(&id)
+        .bind(user_id)
+        .bind(&token_hash)
+        .bind(&expires_at)
+        .execute(db.pool())
+        .await?;
+
+        Ok(token)
     }
 
     /// Logout user (invalidate refresh token)
@@ -417,35 +497,83 @@ impl AuthService {
         hex::encode(hasher.finalize())
     }
 
-    /// Change user password
-    pub async fn change_password(
-        db: &Database,
-        user_id: &str,
-        old_password: &str,
-        new_password: &str,
-    ) -> Result<()> {
-        // Get user
+    pub async fn reauth_with_password(db: &Database, user_id: &str, password: &str) -> Result<String> {
         let user: User = sqlx::query_as("SELECT * FROM users WHERE id = ?")
             .bind(user_id)
             .fetch_one(db.pool())
             .await?;
+        if !user.is_active {
+            return Err(AppError::Forbidden("Account is disabled".to_string()));
+        }
+        if !Self::verify_password(password, &user.password_hash)? {
+            return Err(AppError::BadRequest("Invalid password".to_string()));
+        }
+        Self::create_reauth_token(db, user_id).await
+    }
 
-        // Verify old password
-        if !Self::verify_password(old_password, &user.password_hash)? {
-            return Err(AppError::BadRequest("Invalid old password".to_string()));
+    pub async fn create_reauth_token(db: &Database, user_id: &str) -> Result<String> {
+        let token = Uuid::new_v4().to_string();
+        let token_hash = Self::hash_token(&token);
+        let expires_at = (Utc::now() + Duration::minutes(5)).to_rfc3339();
+        let id = Uuid::new_v4().to_string();
+
+        sqlx::query(
+            r#"
+            INSERT INTO reauth_tokens (id, user_id, token_hash, expires_at, used_at, created_at)
+            VALUES (?, ?, ?, ?, NULL, datetime('now'))
+            "#,
+        )
+        .bind(&id)
+        .bind(user_id)
+        .bind(&token_hash)
+        .bind(&expires_at)
+        .execute(db.pool())
+        .await?;
+
+        Ok(token)
+    }
+
+    async fn consume_reauth_token(db: &Database, user_id: &str, token: &str) -> Result<()> {
+        let token_hash = Self::hash_token(token);
+        let row: Option<(String, String, Option<String>)> = sqlx::query_as(
+            "SELECT user_id, expires_at, used_at FROM reauth_tokens WHERE token_hash = ?",
+        )
+        .bind(&token_hash)
+        .fetch_optional(db.pool())
+        .await?;
+
+        let (stored_user_id, expires_at, used_at) =
+            row.ok_or_else(|| AppError::Unauthorized("Invalid reauth token".to_string()))?;
+        if stored_user_id != user_id {
+            return Err(AppError::Unauthorized("Invalid reauth token".to_string()));
+        }
+        if used_at.is_some() {
+            return Err(AppError::Unauthorized("Invalid reauth token".to_string()));
+        }
+        let exp = chrono::DateTime::parse_from_rfc3339(&expires_at)
+            .map_err(|_| AppError::Internal("Invalid token expiry format".to_string()))?;
+        if exp < Utc::now() {
+            return Err(AppError::Unauthorized("Reauth token expired".to_string()));
         }
 
-        // Validate new password
+        let now = Utc::now().to_rfc3339();
+        sqlx::query("UPDATE reauth_tokens SET used_at = ? WHERE token_hash = ?")
+            .bind(&now)
+            .bind(&token_hash)
+            .execute(db.pool())
+            .await?;
+
+        Ok(())
+    }
+
+    pub async fn change_password(db: &Database, user_id: &str, reauth_token: &str, new_password: &str) -> Result<()> {
+        Self::consume_reauth_token(db, user_id, reauth_token).await?;
+
         if new_password.len() < 6 {
-            return Err(AppError::BadRequest(
-                "Password must be at least 6 characters".to_string(),
-            ));
+            return Err(AppError::BadRequest("Password must be at least 6 characters".to_string()));
         }
 
-        // Hash new password
         let new_hash = Self::hash_password(new_password)?;
-
-        // Update password
         let now = Utc::now().to_rfc3339();
         sqlx::query("UPDATE users SET password_hash = ?, token_version = token_version + 1, updated_at = ? WHERE id = ?")
             .bind(&new_hash)
@@ -454,7 +582,6 @@ impl AuthService {
             .execute(db.pool())
             .await?;
 
-        // Invalidate all refresh tokens
         sqlx::query("DELETE FROM refresh_tokens WHERE user_id = ?")
             .bind(user_id)
             .execute(db.pool())
@@ -576,5 +703,139 @@ impl AuthService {
         };
 
         format!("{} / {}", browser, os)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AuthService;
+    use crate::config::Config;
+    use crate::db::Database;
+    use crate::models::CreateUserRequest;
+    use crate::services::TwoFactorService;
+    use tempfile::NamedTempFile;
+    use totp_rs::TOTP;
+
+    async fn setup_db() -> Database {
+        let f = NamedTempFile::new().unwrap();
+        let path = f.path().to_string_lossy().to_string();
+        drop(f);
+        let db = Database::new(&path).await.unwrap();
+        db.run_migrations().await.unwrap();
+        db
+    }
+
+    #[tokio::test]
+    async fn password_login_requires_2fa_when_enabled() {
+        let db = setup_db().await;
+        let config = Config::default();
+
+        let user = AuthService::register(
+            &db,
+            CreateUserRequest {
+                email: "alice@example.com".to_string(),
+                name: "Alice".to_string(),
+                password: "password123".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let (challenge_id, otpauth_url) =
+            TwoFactorService::begin_totp_enroll(&db, &config, &user.id).await.unwrap();
+        let totp = TOTP::from_url(&otpauth_url).unwrap();
+        let enable_code = totp.generate_current().unwrap();
+        TwoFactorService::enable_totp(&db, &config, &user.id, &challenge_id, &enable_code)
+            .await
+            .unwrap();
+
+        let first = AuthService::login(
+            &db,
+            &config,
+            crate::models::LoginRequest {
+                email: "alice@example.com".to_string(),
+                password: "password123".to_string(),
+            },
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(first.mfa_required);
+        assert!(first.mfa_token.is_some());
+        assert!(first.access_token.is_none());
+
+        let verify_code = totp.generate_current().unwrap();
+        let second = AuthService::login_2fa(
+            &db,
+            &config,
+            first.mfa_token.as_ref().unwrap(),
+            &verify_code,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(!second.mfa_required);
+        assert!(second.access_token.is_some());
+        assert!(second.user.is_some());
+    }
+
+    #[tokio::test]
+    async fn reauth_token_is_one_time() {
+        let db = setup_db().await;
+        let config = Config::default();
+
+        let user = AuthService::register(
+            &db,
+            CreateUserRequest {
+                email: "bob@example.com".to_string(),
+                name: "Bob".to_string(),
+                password: "password123".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let token = AuthService::reauth_with_password(&db, &user.id, "password123")
+            .await
+            .unwrap();
+
+        AuthService::change_password(&db, &user.id, &token, "newpassword123")
+            .await
+            .unwrap();
+
+        let reused = AuthService::change_password(&db, &user.id, &token, "newpassword456").await;
+        assert!(reused.is_err());
+
+        let old_login = AuthService::login(
+            &db,
+            &config,
+            crate::models::LoginRequest {
+                email: "bob@example.com".to_string(),
+                password: "password123".to_string(),
+            },
+            None,
+            None,
+        )
+        .await;
+        assert!(old_login.is_err());
+
+        let new_login = AuthService::login(
+            &db,
+            &config,
+            crate::models::LoginRequest {
+                email: "bob@example.com".to_string(),
+                password: "newpassword123".to_string(),
+            },
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(!new_login.mfa_required);
+        assert!(new_login.access_token.is_some());
     }
 }

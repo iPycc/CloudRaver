@@ -8,7 +8,7 @@ use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use std::net::SocketAddr;
 
 use crate::error::{ApiResponse, AppError, Result};
-use crate::models::{CreateUserRequest, CurrentUser, LoginRequest, UserResponse};
+use crate::models::{CreateUserRequest, CurrentUser, Login2faRequest, LoginRequest, UserResponse};
 use crate::services::AuthService;
 use crate::AppState;
 
@@ -43,6 +43,46 @@ pub async fn login(
         &state.db,
         &state.config,
         req,
+        Some(device_info),
+        Some(ip_address),
+    )
+    .await?;
+
+    let jar = if let Some(refresh_token) = response.refresh_token.as_ref() {
+        let cookie = Cookie::build(("cr_refresh", refresh_token.clone()))
+            .http_only(true)
+            .same_site(SameSite::Lax)
+            .secure(state.config.jwt.cookie_secure)
+            .path("/api/v1")
+            .build();
+        CookieJar::new().add(cookie)
+    } else {
+        CookieJar::new()
+    };
+
+    Ok((jar, Json(ApiResponse::success(response))))
+}
+
+/// Verify 2FA code for password login
+/// POST /api/v1/auth/login/2fa
+pub async fn login_2fa(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(req): Json<Login2faRequest>,
+) -> Result<impl IntoResponse> {
+    let user_agent = headers
+        .get("user-agent")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("Unknown");
+    let device_info = AuthService::parse_user_agent(user_agent);
+    let ip_address = addr.ip().to_string();
+
+    let response = AuthService::login_2fa(
+        &state.db,
+        &state.config,
+        &req.mfa_token,
+        &req.code,
         Some(device_info),
         Some(ip_address),
     )

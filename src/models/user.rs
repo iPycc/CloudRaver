@@ -42,6 +42,9 @@ pub struct User {
     pub storage_limit: i64,
     pub is_active: bool,
     pub token_version: i64,
+    pub totp_enabled: i64,
+    pub totp_secret: Option<String>,
+    pub totp_last_step: Option<i64>,
     pub avatar_key: Option<String>,
     pub avatar_path: Option<String>,
     pub avatar_mime: Option<String>,
@@ -70,6 +73,7 @@ pub struct UserResponse {
     pub storage_used: i64,
     pub storage_limit: i64,
     pub is_active: bool,
+    pub totp_enabled: bool,
     pub avatar_url: Option<String>,
     pub created_at: String,
 }
@@ -85,6 +89,7 @@ impl From<User> for UserResponse {
             storage_used: user.storage_used,
             storage_limit: user.storage_limit,
             is_active: user.is_active,
+            totp_enabled: user.totp_enabled != 0,
             avatar_url: user
                 .avatar_key
                 .as_ref()
@@ -112,19 +117,57 @@ pub struct LoginRequest {
 /// Login response
 #[derive(Debug, Serialize)]
 pub struct LoginResponse {
-    pub access_token: String,
+    pub mfa_required: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mfa_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub access_token: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refresh_token: Option<String>,
     pub token_type: String,
     pub expires_in: u64,
-    pub user: UserResponse,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user: Option<UserResponse>,
 }
 
 /// Change password request
 #[derive(Debug, Deserialize)]
 pub struct ChangePasswordRequest {
-    pub old_password: String,
+    pub reauth_token: String,
     pub new_password: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Login2faRequest {
+    pub mfa_token: String,
+    pub code: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TotpBeginResponse {
+    pub challenge_id: String,
+    pub otpauth_url: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TotpEnableRequest {
+    pub challenge_id: String,
+    pub code: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TotpDisableRequest {
+    pub code: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReauthPasswordRequest {
+    pub password: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ReauthResponse {
+    pub reauth_token: String,
 }
 
 /// Update profile request

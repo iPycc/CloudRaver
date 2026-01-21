@@ -61,6 +61,9 @@ impl Database {
                 storage_limit INTEGER NOT NULL DEFAULT 10737418240,
                 is_active INTEGER NOT NULL DEFAULT 1,
                 token_version INTEGER NOT NULL DEFAULT 0,
+                totp_enabled INTEGER NOT NULL DEFAULT 0,
+                totp_secret TEXT,
+                totp_last_step INTEGER,
                 avatar_key TEXT,
                 avatar_path TEXT,
                 avatar_mime TEXT,
@@ -83,6 +86,15 @@ impl Database {
             .execute(&self.pool)
             .await;
         let _ = sqlx::query("ALTER TABLE users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0")
+            .execute(&self.pool)
+            .await;
+        let _ = sqlx::query("ALTER TABLE users ADD COLUMN totp_enabled INTEGER NOT NULL DEFAULT 0")
+            .execute(&self.pool)
+            .await;
+        let _ = sqlx::query("ALTER TABLE users ADD COLUMN totp_secret TEXT")
+            .execute(&self.pool)
+            .await;
+        let _ = sqlx::query("ALTER TABLE users ADD COLUMN totp_last_step INTEGER")
             .execute(&self.pool)
             .await;
 
@@ -175,6 +187,65 @@ impl Database {
         let _ = sqlx::query("ALTER TABLE refresh_tokens ADD COLUMN ip_address TEXT")
             .execute(&self.pool)
             .await;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS mfa_logins (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                token_hash TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                used_at TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_mfa_logins_hash ON mfa_logins(token_hash)")
+            .execute(&self.pool)
+            .await?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS totp_challenges (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                secret_enc TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_totp_challenges_user_id ON totp_challenges(user_id)")
+            .execute(&self.pool)
+            .await?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS reauth_tokens (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                token_hash TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                used_at TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_reauth_tokens_hash ON reauth_tokens(token_hash)")
+            .execute(&self.pool)
+            .await?;
 
         // WebAuthn / Passkeys
         sqlx::query(

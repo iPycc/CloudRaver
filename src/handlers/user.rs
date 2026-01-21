@@ -48,7 +48,7 @@ pub async fn change_password(
     AuthService::change_password(
         &state.db,
         &current_user.id,
-        &req.old_password,
+        &req.reauth_token,
         &req.new_password,
     )
     .await?;
