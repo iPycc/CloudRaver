@@ -1,0 +1,3 @@
+[env]
+VCPKG_ROOT = "C:\\vcpkg"
+OPENSSL_DIR = "C:\\vcpkg\\installed\\x64-windows"

@@ -171,7 +171,7 @@ impl StoragePolicyService {
         }
 
         // Return with original (unencrypted) config for the response
-        let mut policy = Self::get_policy(db, &policy_id).await?;
+        let policy = Self::get_policy(db, &policy_id).await?;
         // get_policy already decrypts it
         Ok(policy.to_response())
     }

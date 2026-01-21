@@ -14,6 +14,8 @@ pub struct Config {
     pub jwt: JwtConfig,
     #[serde(default)]
     pub storage: StorageConfig,
+    #[serde(default)]
+    pub webauthn: WebAuthnConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -50,6 +52,16 @@ pub struct StorageConfig {
     pub local_path: String,
 }
 
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct WebAuthnConfig {
+    #[serde(default = "default_rp_id")]
+    pub rp_id: String,
+    #[serde(default = "default_rp_name")]
+    pub rp_name: String,
+    #[serde(default = "default_rp_origin")]
+    pub rp_origin: String,
+}
+
 // Default values
 fn default_host() -> String {
     "0.0.0.0".to_string()
@@ -78,6 +90,18 @@ fn default_refresh_token_expire() -> u64 {
 
 fn default_local_path() -> String {
     "data/uploads".to_string()
+}
+
+fn default_rp_id() -> String {
+    "localhost".to_string()
+}
+
+fn default_rp_name() -> String {
+    "CloudRaver".to_string()
+}
+
+fn default_rp_origin() -> String {
+    "http://localhost:3000".to_string()
 }
 
 impl Default for ServerConfig {
@@ -124,6 +148,7 @@ impl Default for Config {
             database: DatabaseConfig::default(),
             jwt: JwtConfig::default(),
             storage: StorageConfig::default(),
+            webauthn: WebAuthnConfig::default(),
         }
     }
 }
@@ -135,6 +160,13 @@ impl Config {
         config.apply_env_overrides();
         config.ensure_directories()?;
         config.ensure_jwt_secret()?;
+        config.ensure_webauthn_defaults();
+        tracing::info!(
+            "WebAuthn config: rp_id={}, rp_origin={}, rp_name={}",
+            config.webauthn.rp_id,
+            config.webauthn.rp_origin,
+            config.webauthn.rp_name
+        );
         Ok(config)
     }
 
@@ -234,6 +266,35 @@ impl Config {
         if let Ok(val) = env::var("CR_CONF_STORAGE_LOCAL_PATH") {
             self.storage.local_path = val;
         }
+
+        // WebAuthn overrides
+        if let Ok(val) = env::var("CR_CONF_WEBAUTHN_RP_ID") {
+            if !val.trim().is_empty() {
+                self.webauthn.rp_id = val;
+            }
+        }
+        if let Ok(val) = env::var("CR_CONF_WEBAUTHN_RP_NAME") {
+            if !val.trim().is_empty() {
+                self.webauthn.rp_name = val;
+            }
+        }
+        if let Ok(val) = env::var("CR_CONF_WEBAUTHN_RP_ORIGIN") {
+            if !val.trim().is_empty() {
+                self.webauthn.rp_origin = val;
+            }
+        }
+    }
+
+    fn ensure_webauthn_defaults(&mut self) {
+        if self.webauthn.rp_id.trim().is_empty() {
+            self.webauthn.rp_id = default_rp_id();
+        }
+        if self.webauthn.rp_name.trim().is_empty() {
+            self.webauthn.rp_name = default_rp_name();
+        }
+        if self.webauthn.rp_origin.trim().is_empty() {
+            self.webauthn.rp_origin = default_rp_origin();
+        }
     }
 
     /// Ensure required directories exist
@@ -249,4 +310,3 @@ impl Config {
         Ok(())
     }
 }
-

@@ -29,6 +29,10 @@ jsonwebtoken = "9"
 argon2 = "0.5"
 rand = "0.8"
 
+# WebAuthn / Passkeys
+webauthn-rs = { version = "0.5.4", features = ["danger-allow-state-serialisation"] }
+url = "2"
+
 # HTTP client for COS
 reqwest = { version = "0.12", features = ["json", "stream"] }
 

@@ -176,6 +176,50 @@ impl Database {
             .execute(&self.pool)
             .await;
 
+        // WebAuthn / Passkeys
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS webauthn_passkeys (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                credential_id TEXT NOT NULL,
+                credential_json TEXT NOT NULL,
+                nickname TEXT,
+                device_info TEXT,
+                ip_address TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                last_used_at TEXT,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        let _ = sqlx::query("ALTER TABLE webauthn_passkeys ADD COLUMN device_info TEXT")
+            .execute(&self.pool)
+            .await;
+        let _ = sqlx::query("ALTER TABLE webauthn_passkeys ADD COLUMN ip_address TEXT")
+            .execute(&self.pool)
+            .await;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS webauthn_challenges (
+                id TEXT PRIMARY KEY,
+                user_id TEXT,
+                flow TEXT NOT NULL,
+                state_json TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                used_at TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
         // Create indexes
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_files_user_id ON files(user_id)")
             .execute(&self.pool)
@@ -196,6 +240,18 @@ impl Database {
             .execute(&self.pool)
             .await?;
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_refresh_tokens_hash ON refresh_tokens(token_hash)")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS idx_webauthn_passkeys_cred_id ON webauthn_passkeys(credential_id)")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_webauthn_passkeys_user_id ON webauthn_passkeys(user_id)")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_webauthn_challenges_user_id ON webauthn_challenges(user_id)")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_webauthn_challenges_expires_at ON webauthn_challenges(expires_at)")
             .execute(&self.pool)
             .await?;
         sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_avatar_key ON users(avatar_key)")

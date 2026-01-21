@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
 use chrono::Utc;
-use sqlx::Row;
 
 use crate::error::{ApiResponse, AppError, Result};
 use crate::models::{CurrentUser, PolicyType, StoragePolicy, File};

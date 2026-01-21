@@ -8,15 +8,9 @@ mod services;
 mod storage;
 mod static_files;
 
-use handlers::{
-    // admin, 
-    auth, file, share, user,
-};
-// use middleware::auth::auth_middleware;
-
 use axum::{
     extract::ConnectInfo,
-    http::{Request, StatusCode},
+    http::Request,
     middleware::{self as axum_middleware, Next},
     response::Response,
     routing::{delete, get, post, put},
@@ -130,6 +124,14 @@ fn create_router(state: AppState) -> Router {
         .route("/auth/register", post(handlers::auth::register))
         .route("/auth/login", post(handlers::auth::login))
         .route("/auth/refresh", post(handlers::auth::refresh_token))
+        .route(
+            "/auth/webauthn/authenticate/begin",
+            post(handlers::passkey::begin_authenticate),
+        )
+        .route(
+            "/auth/webauthn/authenticate/finish",
+            post(handlers::passkey::finish_authenticate),
+        )
         .route("/avatar/:key", get(handlers::user::get_avatar_by_key))
         // Public share routes
         .route("/public/share/:token", get(handlers::share::get_public_share))
@@ -140,11 +142,15 @@ fn create_router(state: AppState) -> Router {
     let protected_routes = Router::new()
         // Auth
         .route("/auth/logout", post(handlers::auth::logout))
+        .route("/auth/webauthn/register/begin", post(handlers::passkey::begin_register))
+        .route("/auth/webauthn/register/finish", post(handlers::passkey::finish_register))
         // User profile
         .route("/user/profile", get(handlers::user::get_profile).put(handlers::user::update_profile))
         .route("/user/password", put(handlers::user::change_password))
         .route("/user/storage", get(handlers::user::get_storage_usage))
         .route("/user/avatar", post(handlers::user::upload_avatar))
+        .route("/user/passkeys", get(handlers::passkey::list_passkeys))
+        .route("/user/passkeys/:id", delete(handlers::passkey::delete_passkey))
         // User sessions
         .route("/user/sessions", get(handlers::auth::list_sessions))
         .route("/user/sessions/:id", delete(handlers::auth::delete_session))

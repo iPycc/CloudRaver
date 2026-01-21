@@ -149,7 +149,33 @@ impl AuthService {
             return Err(AppError::Unauthorized("Invalid email or password".to_string()));
         }
 
-        // Generate tokens
+        Self::issue_login_response(db, config, user, device_info, ip_address).await
+    }
+
+    pub async fn login_user(
+        db: &Database,
+        config: &Config,
+        user_id: &str,
+        device_info: Option<String>,
+        ip_address: Option<String>,
+    ) -> Result<LoginResponse> {
+        let user: User = sqlx::query_as("SELECT * FROM users WHERE id = ?")
+            .bind(user_id)
+            .fetch_one(db.pool())
+            .await?;
+        if !user.is_active {
+            return Err(AppError::Forbidden("Account is disabled".to_string()));
+        }
+        Self::issue_login_response(db, config, user, device_info, ip_address).await
+    }
+
+    async fn issue_login_response(
+        db: &Database,
+        config: &Config,
+        user: User,
+        device_info: Option<String>,
+        ip_address: Option<String>,
+    ) -> Result<LoginResponse> {
         let (refresh_token, session_id) =
             Self::generate_refresh_token(db, &user.id, config, device_info, ip_address).await?;
         let access_token = Self::generate_access_token(&user, config, Some(&session_id))?;
